@@ -11,12 +11,25 @@ fn describe(k: &Kind) -> String {
         Kind::Fn => "fn",
         Kind::Var => "var",
         Kind::Const => "const",
+        Kind::If => "if",
+        Kind::Else => "else",
+        Kind::True => "true",
+        Kind::False => "false",
         Kind::Plus => "+",
         Kind::Minus => "-",
         Kind::Star => "*",
         Kind::Slash => "/",
         Kind::Percent => "%",
         Kind::Assign => "=",
+        Kind::Eq => "==",
+        Kind::NotEq => "!=",
+        Kind::Lt => "<",
+        Kind::LtEq => "<=",
+        Kind::Gt => ">",
+        Kind::GtEq => ">=",
+        Kind::AndAnd => "&&",
+        Kind::OrOr => "||",
+        Kind::Bang => "!",
         Kind::LParen => "(",
         Kind::RParen => ")",
         Kind::LBrace => "{",
@@ -155,26 +168,33 @@ impl Parser {
         }
     }
 
-    // stmt = ( "var" | "const" ) IDENT [ ":" IDENT ] "=" expr
+    // stmt = ( "var" | "const" ) IDENT [ ":" type ] "=" expr
     //      | IDENT "=" expr
+    //      | if_stmt
     //      | expr
 
     fn stmt(&mut self) -> PResult<Stmt> {
         let start = self.span();
+        match self.peek() {
+            Kind::If => return self.if_stmt(),
+            Kind::Else => {
+                // A line break after `}` has already ended the `if`, as in Go.
+                return Err(Error {
+                    message: "`else` must be on the same line as the `}` before it".to_string(),
+                    span: start,
+                });
+            }
+            _ => {}
+        }
         if matches!(self.peek(), Kind::Var | Kind::Const) {
             // `var` can change later, and `const` cannot.
             let mutable = *self.peek() == Kind::Var;
             self.bump();
             let name = self.ident()?;
+            let mut ty = None;
             if *self.peek() == Kind::Colon {
                 self.bump();
-                let ty = self.ident()?;
-                if ty != "i32" {
-                    return Err(Error {
-                        message: format!("only `i32` is supported so far, not `{ty}`"),
-                        span: self.tokens[self.pos - 1].span,
-                    });
-                }
+                ty = Some(self.type_name()?);
             }
             self.expect(Kind::Assign, "`=`")?;
             let value = self.expr()?;
@@ -182,6 +202,7 @@ impl Parser {
             return Ok(Stmt::Let {
                 name,
                 mutable,
+                ty,
                 value,
                 span,
             });
@@ -203,11 +224,52 @@ impl Parser {
         Ok(Stmt::Expr(expr))
     }
 
-    // Expressions use precedence climbing:
-    //   expr  = term { ("+" | "-") term }
-    //   term  = unary { ("*" | "/" | "%") unary }
-    //   unary = "-" unary | call
-    //   call  = primary [ "(" args ")" ]
+    // type = "i32" | "bool"
+
+    fn type_name(&mut self) -> PResult<Type> {
+        match self.ident()?.as_str() {
+            "i32" => Ok(Type::I32),
+            "bool" => Ok(Type::Bool),
+            other => Err(Error {
+                message: format!("unknown type `{other}`; only `i32` and `bool` exist so far"),
+                span: self.tokens[self.pos - 1].span,
+            }),
+        }
+    }
+
+    // if_stmt = "if" "(" expr ")" block [ "else" ( if_stmt | block ) ]
+
+    fn if_stmt(&mut self) -> PResult<Stmt> {
+        self.expect(Kind::If, "`if`")?;
+        self.expect(Kind::LParen, "`(` around the condition")?;
+        let cond = self.expr()?;
+        self.expect(Kind::RParen, "`)`")?;
+        let then = self.block()?;
+        let otherwise = if *self.peek() == Kind::Else {
+            self.bump();
+            if *self.peek() == Kind::If {
+                Some(vec![self.if_stmt()?])
+            } else {
+                Some(self.block()?)
+            }
+        } else {
+            None
+        };
+        Ok(Stmt::If {
+            cond,
+            then,
+            otherwise,
+        })
+    }
+
+    // Expressions use precedence climbing, from loosest to tightest:
+    //   expr    = and { "||" and }
+    //   and     = compare { "&&" compare }
+    //   compare = sum { ("==" | "!=" | "<" | "<=" | ">" | ">=") sum }
+    //   sum     = term { ("+" | "-") term }
+    //   term    = unary { ("*" | "/" | "%") unary }
+    //   unary   = ("-" | "!") unary | call
+    //   call    = primary [ "(" args ")" ]
 
     fn expr(&mut self) -> PResult<Expr> {
         self.binary(1)
@@ -217,11 +279,19 @@ impl Parser {
         let mut left = self.unary()?;
         loop {
             let (op, level) = match self.peek() {
-                Kind::Plus => (BinOp::Add, 1),
-                Kind::Minus => (BinOp::Sub, 1),
-                Kind::Star => (BinOp::Mul, 2),
-                Kind::Slash => (BinOp::Div, 2),
-                Kind::Percent => (BinOp::Rem, 2),
+                Kind::OrOr => (BinOp::Or, 1),
+                Kind::AndAnd => (BinOp::And, 2),
+                Kind::Eq => (BinOp::Eq, 3),
+                Kind::NotEq => (BinOp::NotEq, 3),
+                Kind::Lt => (BinOp::Lt, 3),
+                Kind::LtEq => (BinOp::LtEq, 3),
+                Kind::Gt => (BinOp::Gt, 3),
+                Kind::GtEq => (BinOp::GtEq, 3),
+                Kind::Plus => (BinOp::Add, 4),
+                Kind::Minus => (BinOp::Sub, 4),
+                Kind::Star => (BinOp::Mul, 5),
+                Kind::Slash => (BinOp::Div, 5),
+                Kind::Percent => (BinOp::Rem, 5),
                 _ => return Ok(left),
             };
             if level < min_level {
@@ -240,17 +310,19 @@ impl Parser {
     }
 
     fn unary(&mut self) -> PResult<Expr> {
-        if *self.peek() == Kind::Minus {
-            let start = self.span();
-            self.bump();
-            let inner = self.unary()?;
-            let span = Span {
-                start: start.start,
-                end: inner.span().end,
-            };
-            return Ok(Expr::Neg(Box::new(inner), span));
-        }
-        self.call()
+        let start = self.span();
+        let make = match self.peek() {
+            Kind::Minus => Expr::Neg,
+            Kind::Bang => Expr::Not,
+            _ => return self.call(),
+        };
+        self.bump();
+        let inner = self.unary()?;
+        let span = Span {
+            start: start.start,
+            end: inner.span().end,
+        };
+        Ok(make(Box::new(inner), span))
     }
 
     fn call(&mut self) -> PResult<Expr> {
@@ -276,7 +348,13 @@ impl Parser {
                 self.bump();
             }
             self.expect(Kind::RParen, "`,` or `)`")?;
-            expr = Expr::Call(path, args, self.span_from(start));
+            let span = self.span_from(start);
+            expr = Expr::Call {
+                path,
+                args,
+                arg_types: Vec::new(),
+                span,
+            }
         }
         Ok(expr)
     }
@@ -287,6 +365,11 @@ impl Parser {
             Kind::Int(value) => {
                 self.bump();
                 Ok(Expr::Int(value, span))
+            }
+            Kind::True | Kind::False => {
+                let value = *self.peek() == Kind::True;
+                self.bump();
+                Ok(Expr::Bool(value, span))
             }
             Kind::Ident(name) => {
                 self.bump();
@@ -315,10 +398,12 @@ mod tests {
         fn show(e: &Expr) -> String {
             match e {
                 Expr::Int(v, _) => v.to_string(),
+                Expr::Bool(v, _) => v.to_string(),
                 Expr::Var(name, _) => name.clone(),
                 Expr::Neg(inner, _) => format!("(- {})", show(inner)),
+                Expr::Not(inner, _) => format!("(! {})", show(inner)),
                 Expr::Binary(op, l, r, _) => format!("({op:?} {} {})", show(l), show(r)),
-                Expr::Call(path, args, _) => {
+                Expr::Call { path, args, .. } => {
                     let args: Vec<String> = args.iter().map(show).collect();
                     format!("{}({})", path.join("."), args.join(" "))
                 }
@@ -327,6 +412,7 @@ mod tests {
         match &program.body[0] {
             Stmt::Expr(e) => show(e),
             Stmt::Let { value, .. } | Stmt::Assign { value, .. } => show(value),
+            Stmt::If { cond, .. } => show(cond),
         }
     }
 
@@ -336,6 +422,35 @@ mod tests {
         assert_eq!(shape("(1 + 2) * 3"), "(Mul (Add 1 2) 3)");
         assert_eq!(shape("a - b - c"), "(Sub (Sub a b) c)");
         assert_eq!(shape("-a * b"), "(Mul (- a) b)");
+    }
+
+    #[test]
+    fn logic_precedence() {
+        assert_eq!(shape("a + 1 < b * 2"), "(Lt (Add a 1) (Mul b 2))");
+        assert_eq!(shape("a || b && c"), "(Or a (And b c))");
+        assert_eq!(shape("a == b && c != d"), "(And (Eq a b) (NotEq c d))");
+        assert_eq!(shape("!a || b"), "(Or (! a) b)");
+        assert_eq!(shape("a < b < c"), "(Lt (Lt a b) c)");
+    }
+
+    #[test]
+    fn else_if_nests() {
+        let source = "fn main() {\nif (a) {\n} else if (b) {\n} else {\n}\n}\n";
+        let program = Parser::new(lex(source).unwrap()).program().unwrap();
+        let Stmt::If {
+            otherwise: Some(otherwise),
+            ..
+        } = &program.body[0]
+        else {
+            panic!("expected an if with an else");
+        };
+        assert!(matches!(
+            &otherwise[..],
+            [Stmt::If {
+                otherwise: Some(_),
+                ..
+            }]
+        ));
     }
 
     #[test]

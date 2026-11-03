@@ -57,8 +57,8 @@ fn main() {
 
 fn compile(source: &str) -> Result<String, Error> {
     let tokens = lexer::lex(source)?;
-    let program = parser::Parser::new(tokens).program()?;
-    check::check(&program)?;
+    let mut program = parser::Parser::new(tokens).program()?;
+    check::check(&mut program)?;
     Ok(codegen::generate(&program))
 }
 

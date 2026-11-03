@@ -20,6 +20,10 @@ pub enum Kind {
     Fn,
     Var,
     Const,
+    If,
+    Else,
+    True,
+    False,
     // Operators and punctuation
     Plus,
     Minus,
@@ -27,6 +31,15 @@ pub enum Kind {
     Slash,
     Percent,
     Assign,
+    Eq,
+    NotEq,
+    Lt,
+    LtEq,
+    Gt,
+    GtEq,
+    AndAnd,
+    OrOr,
+    Bang,
     LParen,
     RParen,
     LBrace,
@@ -49,8 +62,28 @@ pub struct Token {
 fn ends_statement(tok: &Kind) -> bool {
     matches!(
         tok,
-        Kind::Ident(_) | Kind::Int(_) | Kind::Str(_) | Kind::RParen | Kind::RBrace
+        Kind::Ident(_)
+            | Kind::Int(_)
+            | Kind::Str(_)
+            | Kind::True
+            | Kind::False
+            | Kind::RParen
+            | Kind::RBrace
     )
+}
+
+/// The operators written with two characters, such as `==`.
+fn two_char(first: u8, second: Option<&u8>) -> Option<Kind> {
+    let tok = match (first, *second?) {
+        (b'=', b'=') => Kind::Eq,
+        (b'!', b'=') => Kind::NotEq,
+        (b'<', b'=') => Kind::LtEq,
+        (b'>', b'=') => Kind::GtEq,
+        (b'&', b'&') => Kind::AndAnd,
+        (b'|', b'|') => Kind::OrOr,
+        _ => return None,
+    };
+    Some(tok)
 }
 
 pub fn lex(src: &str) -> Result<Vec<Token>, Error> {
@@ -95,6 +128,10 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Error> {
                 "fn" => Kind::Fn,
                 "var" => Kind::Var,
                 "const" => Kind::Const,
+                "if" => Kind::If,
+                "else" => Kind::Else,
+                "true" => Kind::True,
+                "false" => Kind::False,
                 name => Kind::Ident(name.to_string()),
             }
         } else if c.is_ascii_digit() {
@@ -122,6 +159,9 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Error> {
             }
             pos += 1;
             Kind::Str(src[start + 1..pos - 1].to_string())
+        } else if let Some(kind) = two_char(c, bytes.get(pos + 1)) {
+            pos += 2;
+            kind
         } else {
             pos += 1;
             match c {
@@ -131,6 +171,9 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Error> {
                 b'/' => Kind::Slash,
                 b'%' => Kind::Percent,
                 b'=' => Kind::Assign,
+                b'<' => Kind::Lt,
+                b'>' => Kind::Gt,
+                b'!' => Kind::Bang,
                 b'(' => Kind::LParen,
                 b')' => Kind::RParen,
                 b'{' => Kind::LBrace,
@@ -214,6 +257,25 @@ mod tests {
         assert_eq!(
             kinds("1_000 // a comment\n"),
             [Kind::Int(1000), Kind::Semi, Kind::Eof]
+        );
+    }
+
+    #[test]
+    fn two_character_operators() {
+        assert_eq!(
+            kinds("a<=b == !c&&d"),
+            [
+                Kind::Ident("a".into()),
+                Kind::LtEq,
+                Kind::Ident("b".into()),
+                Kind::Eq,
+                Kind::Bang,
+                Kind::Ident("c".into()),
+                Kind::AndAnd,
+                Kind::Ident("d".into()),
+                Kind::Semi,
+                Kind::Eof,
+            ]
         );
     }
 }
